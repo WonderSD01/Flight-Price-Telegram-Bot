@@ -1,80 +1,127 @@
+import os
 import time
 import requests
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from webdriver_manager.chrome import ChromeDriverManager
+from dotenv import load_dotenv
+from datetime import datetime, timedelta
 
-# --- CONFIGURATION ---
-TOKEN = "8774011337:AAEAIDg_5R204ToKBW0Tuu_tIUHlRd7QPb0"
-CHAT_ID = "908651332"
+# Load environment variables
+load_dotenv()
+TOKEN = os.getenv("TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
 
-def scrape_lowest_flight(destination):
-    """The logic to open browser and find the cheapest price on the page"""
-    chrome_options = Options()
-    # chrome_options.add_argument("--headless") # Background mode
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
-    
+# RapidAPI host
+RAPIDAPI_HOST = "kiwi-com-provider.p.rapidapi.com"
+
+# Manila IATA code
+ORIGIN = "MNL"
+
+def send_message(text):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    requests.post(url, data={"chat_id": CHAT_ID, "text": text})
+
+def get_iata_codes(city_name):
+    """
+    Call Kiwi Locations API to get IATA codes for a city/country
+    Returns a list of IATA codes
+    """
+    url = f"https://{RAPIDAPI_HOST}/locations/query"
+    headers = {
+        "X-RapidAPI-Key": RAPIDAPI_KEY,
+        "X-RapidAPI-Host": RAPIDAPI_HOST
+    }
+    params = {
+        "term": city_name,
+        "location_types": "airport,city",
+        "limit": 5
+    }
     try:
-        driver.get("https://www.google.com/flights")
-        time.sleep(3)
+        response = requests.get(url, headers=headers, params=params).json()
+        locations = response.get("locations", [])
+        iata_codes = [loc["code"] for loc in locations if "code" in loc]
+        return iata_codes
+    except Exception as e:
+        print("Kiwi Locations API error:", e)
+        return []
 
-        # Input Destination from user
-        to_box = driver.find_element(By.CSS_SELECTOR, "input[placeholder='Where to?']")
-        to_box.send_keys(destination)
-        time.sleep(1)
-        to_box.send_keys(Keys.ENTER)
-        time.sleep(5) # Wait for all flights to load
+def search_flight(dest_iata):
+    """
+    Search cheapest flight using Kiwi Search API
+    """
+    url = f"https://{RAPIDAPI_HOST}/v2/search"
+    headers = {
+        "X-RapidAPI-Key": RAPIDAPI_KEY,
+        "X-RapidAPI-Host": RAPIDAPI_HOST
+    }
+    # Date range: tomorrow to 1 month
+    date_from = (datetime.now() + timedelta(days=1)).strftime("%d/%m/%Y")
+    date_to = (datetime.now() + timedelta(days=30)).strftime("%d/%m/%Y")
 
-        # Find ALL prices on the page
-        price_elements = driver.find_elements(By.XPATH, "//span[contains(text(), '₱')]")
-        all_prices = []
-
-        for el in price_elements:
-            raw_text = el.text.replace('₱', '').replace(',', '').strip()
-            if raw_text.isdigit():
-                all_prices.append(int(raw_text))
-
-        if all_prices:
-            lowest = min(all_prices) # Find the absolute lowest
-            return lowest, driver.current_url
+    params = {
+        "fly_from": ORIGIN,
+        "fly_to": dest_iata,
+        "date_from": date_from,
+        "date_to": date_to,
+        "one_for_city": 1,
+        "curr": "PHP",
+        "sort": "price",
+        "limit": 1
+    }
+    try:
+        response = requests.get(url, headers=headers, params=params).json()
+        data = response.get("data", [])
+        if data:
+            flight = data[0]
+            price = flight.get("price")
+            link = flight.get("deep_link")
+            return price, link
+        return None, None
+    except Exception as e:
+        print("Kiwi Search API error:", e)
         return None, None
 
-    finally:
-        driver.quit()
-
 def handle_telegram_messages():
-    """Checks Telegram for new destination requests"""
     last_update_id = 0
-    print("Bot is listening... Type a country name in Telegram!")
+    print("🚀 Flight Bot running (Dynamic RapidAPI Kiwi)")
 
     while True:
-        # Check for new messages
-        url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={last_update_id + 1}"
-        response = requests.get(url).json()
+        try:
+            url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={last_update_id + 1}"
+            response = requests.get(url).json()
 
-        for result in response.get("result", []):
-            last_update_id = result["update_id"]
-            user_message = result["message"]["text"]
-            
-            # Acknowledge the request
-            requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", 
-                          data={"chat_id": CHAT_ID, "text": f"🔍 Searching for the cheapest flights to {user_message}..."})
+            for result in response.get("result", []):
+                last_update_id = result["update_id"]
+                message = result.get("message", {}).get("text")
+                if not message:
+                    continue
 
-            # Run the scraper
-            price, link = scrape_lowest_flight(user_message)
+                city_name = message.strip()
+                send_message(f"✈️ Searching flights from Manila to '{city_name}'...")
 
-            if price:
-                reply = f"✈️ LOWEST PRICE FOUND!\n📍 To: {user_message}\n💰 Price: ₱{price}\n🔗 Link: {link}"
-            else:
-                reply = f"❌ Sorry, I couldn't find any flights to {user_message} right now."
-            
-            requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", 
-                          data={"chat_id": CHAT_ID, "text": reply})
+                # Get IATA codes dynamically
+                iata_codes = get_iata_codes(city_name)
+                if not iata_codes:
+                    send_message(f"❌ Could not find airport for '{city_name}'. Try a major city or country.")
+                    continue
 
-        time.sleep(3) # Don't spam the API
+                # Search flights for the first valid IATA code
+                price, link = None, None
+                for code in iata_codes:
+                    price, link = search_flight(code)
+                    if price and link:
+                        break
+
+                if price and link:
+                    reply = f"✅ Cheapest flight found:\n📍 Manila → {city_name}\n💰 ₱{price:,}\n🔗 {link}"
+                else:
+                    reply = f"❌ No flights found for Manila → {city_name} in the next month."
+
+                send_message(reply)
+
+        except Exception as e:
+            print("Bot loop error:", e)
+
+        time.sleep(3)
 
 if __name__ == "__main__":
     handle_telegram_messages()
