@@ -10,50 +10,59 @@ TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
 
-# RapidAPI host
-RAPIDAPI_HOST = "kiwi-com-provider.p.rapidapi.com"
-
-# Manila IATA code
+RAPIDAPI_HOST = "kiwi-com-cheap-flights.p.rapidapi.com"
 ORIGIN = "MNL"
+
+# Predefined major airports for countries (fallback if user types a country)
+COUNTRY_AIRPORTS = {
+    "thailand": ["BKK", "HKT", "CNX"],
+    "singapore": ["SIN"],
+    "japan": ["NRT", "HND", "KIX"],
+    "korea": ["ICN", "PUS"],
+    "usa": ["JFK", "LAX", "SFO", "ORD", "MIA"],
+    "united states": ["JFK", "LAX", "SFO", "ORD", "MIA"],
+    "malaysia": ["KUL", "PEN"],
+    "vietnam": ["SGN", "HAN", "DAD"],
+    "china": ["PEK", "PVG", "CAN"],
+    "hong kong": ["HKG"],
+    "australia": ["SYD", "MEL", "BNE"]
+}
 
 def send_message(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     requests.post(url, data={"chat_id": CHAT_ID, "text": text})
 
-def get_iata_codes(city_name):
-    """
-    Call Kiwi Locations API to get IATA codes for a city/country
-    Returns a list of IATA codes
-    """
+def get_iata_codes(location_name):
+    """Get IATA codes from Kiwi Locations API"""
     url = f"https://{RAPIDAPI_HOST}/locations/query"
     headers = {
         "X-RapidAPI-Key": RAPIDAPI_KEY,
         "X-RapidAPI-Host": RAPIDAPI_HOST
     }
     params = {
-        "term": city_name,
+        "term": location_name,
         "location_types": "airport,city",
         "limit": 5
     }
+
     try:
         response = requests.get(url, headers=headers, params=params).json()
         locations = response.get("locations", [])
-        iata_codes = [loc["code"] for loc in locations if "code" in loc]
-        return iata_codes
+        codes = [loc["code"] for loc in locations if "code" in loc]
+        return codes
     except Exception as e:
         print("Kiwi Locations API error:", e)
         return []
 
 def search_flight(dest_iata):
-    """
-    Search cheapest flight using Kiwi Search API
-    """
+    """Search cheapest flight using Kiwi Search API"""
     url = f"https://{RAPIDAPI_HOST}/v2/search"
     headers = {
         "X-RapidAPI-Key": RAPIDAPI_KEY,
         "X-RapidAPI-Host": RAPIDAPI_HOST
     }
-    # Date range: tomorrow to 1 month
+
+    # Date range: tomorrow to 1 month later
     date_from = (datetime.now() + timedelta(days=1)).strftime("%d/%m/%Y")
     date_to = (datetime.now() + timedelta(days=30)).strftime("%d/%m/%Y")
 
@@ -67,14 +76,13 @@ def search_flight(dest_iata):
         "sort": "price",
         "limit": 1
     }
+
     try:
         response = requests.get(url, headers=headers, params=params).json()
-        data = response.get("data", [])
-        if data:
-            flight = data[0]
-            price = flight.get("price")
-            link = flight.get("deep_link")
-            return price, link
+        flights = response.get("data", [])
+        if flights:
+            flight = flights[0]
+            return flight.get("price"), flight.get("deep_link")
         return None, None
     except Exception as e:
         print("Kiwi Search API error:", e)
@@ -82,7 +90,7 @@ def search_flight(dest_iata):
 
 def handle_telegram_messages():
     last_update_id = 0
-    print("🚀 Flight Bot running (Dynamic RapidAPI Kiwi)")
+    print("🚀 Flight Bot running (Dynamic Kiwi version)")
 
     while True:
         try:
@@ -95,26 +103,39 @@ def handle_telegram_messages():
                 if not message:
                     continue
 
-                city_name = message.strip()
-                send_message(f"✈️ Searching flights from Manila to '{city_name}'...")
+                user_input = message.strip().lower()
+                send_message(f"✈️ Searching flights from Manila to '{message.strip()}'...")
 
-                # Get IATA codes dynamically
-                iata_codes = get_iata_codes(city_name)
+                # Step 1: Try getting IATA codes directly from Kiwi
+                iata_codes = get_iata_codes(user_input)
+
+                # Step 2: If no codes found, check fallback country airports
+                if not iata_codes and user_input in COUNTRY_AIRPORTS:
+                    iata_codes = COUNTRY_AIRPORTS[user_input]
+
                 if not iata_codes:
-                    send_message(f"❌ Could not find airport for '{city_name}'. Try a major city or country.")
+                    send_message(f"❌ Could not find any airport for '{message.strip()}'. Try a city or major airport.")
                     continue
 
-                # Search flights for the first valid IATA code
-                price, link = None, None
+                # Step 3: Search flights across all IATA codes and pick the cheapest
+                cheapest_price = None
+                cheapest_link = None
                 for code in iata_codes:
                     price, link = search_flight(code)
-                    if price and link:
-                        break
+                    if price:
+                        if cheapest_price is None or price < cheapest_price:
+                            cheapest_price = price
+                            cheapest_link = link
 
-                if price and link:
-                    reply = f"✅ Cheapest flight found:\n📍 Manila → {city_name}\n💰 ₱{price:,}\n🔗 {link}"
+                if cheapest_price and cheapest_link:
+                    reply = (
+                        f"✅ Cheapest flight found!\n\n"
+                        f"📍 Manila → {message.strip()}\n"
+                        f"💰 ₱{cheapest_price:,}\n"
+                        f"🔗 {cheapest_link}"
+                    )
                 else:
-                    reply = f"❌ No flights found for Manila → {city_name} in the next month."
+                    reply = f"❌ No flights found for Manila → {message.strip()} in the next month."
 
                 send_message(reply)
 
