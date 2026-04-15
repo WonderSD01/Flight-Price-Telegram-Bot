@@ -9,9 +9,9 @@ load_dotenv()
 TOKEN = os.getenv("TOKEN")
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
 # Render provides a dynamic URL. Replace this with your Render URL after creating the service.
-RENDER_URL = os.getenv("RENDER_EXTERNAL_URL") 
+RENDER_URL = os.getenv("https://flight-price-telegram-bot.onrender.com") 
 
-ORIGIN = "MNL"
+ORIGIN = "MNL"  
 
 app = Flask(__name__)
 
