@@ -2,177 +2,115 @@ import os
 import requests
 from flask import Flask, request
 from dotenv import load_dotenv
-from concurrent.futures import ThreadPoolExecutor
 
 # -------- LOAD ENV --------
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
-RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
-
-# Replace this with your actual Render URL
+SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 RENDER_URL = "https://flight-price-telegram-bot.onrender.com"
-ORIGIN = "MNL"  
 
 app = Flask(__name__)
 
-# -------- DATA DICTIONARIES --------
-# Maps user input to IATA codes
-CITY_AIRPORTS = {
-    "tokyo": ["NRT", "HND"],
-    "osaka": ["KIX"],
-    "bangkok": ["BKK"],
-    "singapore": ["SIN"],
-    "seoul": ["ICN"],
-    "hong kong": ["HKG"],
-    "taipei": ["TPE"]
-}
-
-COUNTRY_AIRPORTS = {
-    "japan": ["NRT", "HND", "KIX"],
-    "korea": ["ICN", "PUS"],
-    "thailand": ["BKK", "HKT"],
-    "taiwan": ["TPE", "KHH"],
-    "vietnam": ["SGN", "HAN"]
-}
-
-# CRITICAL: Maps IATA codes to SkyScrapper Entity IDs
-# Without these specific IDs, the API returns "No results"
-ENTITY_MAP = {
-    "NRT": "95673321", # Tokyo Narita
-    "HND": "95673320", # Tokyo Haneda
-    "KIX": "95673551", # Osaka
-    "BKK": "95565061", # Bangkok
-    "HKT": "95565058", # Phuket
-    "ICN": "95692133", # Seoul
-    "PUS": "95692135", # Busan
-    "SIN": "95565050", # Singapore
-    "HKG": "95565074", # Hong Kong
-    "TPE": "95673620", # Taipei
-    "SGN": "95565065", # Ho Chi Minh
-    "HAN": "95565063", # Hanoi
+# -------- DATA DICTIONARIES (Simplified for Speed) --------
+# We use only the main airport for each to keep it fast
+DESTINATIONS = {
+    "tokyo": "NRT",
+    "japan": "NRT",
+    "osaka": "KIX",
+    "bangkok": "BKK",
+    "thailand": "BKK",
+    "singapore": "SIN",
+    "seoul": "ICN",
+    "korea": "ICN",
+    "hong kong": "HKG",
+    "taipei": "TPE"
 }
 
 # -------- TELEGRAM HELPERS --------
 def send_message(chat_id, text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
-    try:
-        requests.post(url, data=payload)
-    except Exception as e:
-        print(f"Error sending message: {e}")
+    requests.post(url, data={"chat_id": chat_id, "text": text})
 
 def set_webhook():
-    if RENDER_URL and TOKEN:
-        webhook_url = f"{RENDER_URL}/{TOKEN}"
-        url = f"https://api.telegram.org/bot{TOKEN}/setWebhook?url={webhook_url}"
-        res = requests.get(url)
-        print(f"✅ Webhook setup attempt: {res.json()}")
+    webhook_url = f"{RENDER_URL}/{TOKEN}"
+    url = f"https://api.telegram.org/bot{TOKEN}/setWebhook?url={webhook_url}"
+    requests.get(url)
 
-# -------- FLIGHT SEARCH LOGIC --------
-def search_flight(dest_iata):
-    """Calls the SkyScrapper API using the correct Entity ID."""
-    url = "https://sky-scrapper.p.rapidapi.com/api/v1/flights/searchFlights"
+# -------- FLIGHT SEARCH (Simplified) --------
+def get_flight(iata):
+    """Checks Google Flights for one specific airport."""
+    url = "https://serpapi.com/search"
+    params = {
+        "engine": "google_flights",
+        "departure_id": "MNL",
+        "arrival_id": iata,
+        "outbound_date": "2026-08-15", # Further date for better availability
+        "currency": "PHP",
+        "hl": "en",
+        "api_key": SERPAPI_KEY
+    }
     
-    # Get the entity ID for the specific airport
-    # Defaulting to Tokyo's ID if not in map, but BKK/HKT are now included!
-    dest_entity = ENTITY_MAP.get(dest_iata, "95673321")
-
-    querystring = {
-        "originSkyId": ORIGIN,
-        "destinationSkyId": dest_iata,
-        "originEntityId": "95673398", # Manila Entity ID
-        "destinationEntityId": dest_entity, 
-        "date": "2026-06-15",
-        "cabinClass": "economy",
-        "adults": "1",
-        "sortBy": "best",
-        "currency": "PHP"
-    }
-
-    headers = {
-        "X-RapidAPI-Key": RAPIDAPI_KEY,
-        "X-RapidAPI-Host": "sky-scrapper.p.rapidapi.com"
-    }
-
     try:
-        response = requests.get(url, headers=headers, params=querystring, timeout=15)
+        # We use a 15-second timeout to prevent Render from hanging
+        response = requests.get(url, params=params, timeout=15)
         data = response.json()
         
-        if data.get("status") and data.get("data") and data["data"].get("itineraries"):
-            cheapest = data["data"]["itineraries"][0]
+        # Look for flights in 'best_flights' or 'other_flights'
+        flights = data.get("best_flights", []) or data.get("other_flights", [])
+        
+        if flights:
+            top = flights[0]
             return {
-                "price": cheapest["price"]["raw"],
-                "airline": cheapest["legs"][0]["carriers"]["marketing"][0]["name"],
-                "iata": dest_iata
+                "price": top.get("price"),
+                "airline": top["flights"][0].get("airline"),
+                "iata": iata
             }
     except Exception as e:
-        print(f"Error searching {dest_iata}: {e}")
+        print(f"Error: {e}")
     return None
-
-def get_iata_codes(user_input):
-    """Returns a list of IATA codes based on city or country."""
-    if user_input in CITY_AIRPORTS:
-        return CITY_AIRPORTS[user_input]
-    if user_input in COUNTRY_AIRPORTS:
-        return COUNTRY_AIRPORTS[user_input]
-    return []
-
-def find_cheapest(iata_list):
-    """Searches multiple airports in parallel to save time."""
-    with ThreadPoolExecutor() as executor:
-        results = list(executor.map(search_flight, iata_list))
-    
-    valid_results = [r for r in results if r is not None]
-    if not valid_results:
-        return None
-    # Returns the result with the lowest price
-    return min(valid_results, key=lambda x: x["price"])
 
 # -------- WEBHOOK ROUTE --------
 @app.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
     data = request.json
-    if not data or "message" not in data:
+    if not data or "message" not in data: return "OK", 200
+
+    chat_id = data["message"]["chat"]["id"]
+    text = data["message"].get("text", "").lower().strip()
+
+    # 1. Check if we support the destination
+    iata = DESTINATIONS.get(text)
+    if not iata:
+        send_message(chat_id, "❌ Try 'Japan' or 'Bangkok'.")
         return "OK", 200
 
-    message = data["message"]
-    chat_id = message.get("chat", {}).get("id")
-    text = message.get("text", "").lower().strip()
-
-    if not text or not chat_id:
-        return "OK", 200
-
-    # 1. Match input to airports
-    iata_codes = get_iata_codes(text)
-
-    if not iata_codes:
-        send_message(chat_id, "❌ Sorry, I don't recognize that destination. Try 'Japan' or 'Bangkok'.")
-        return "OK", 200
-
-    # 2. Start search
-    send_message(chat_id, f"🔍 Searching for the cheapest flights to {text.title()} for June 15...")
-
-    # 3. Find results
-    result = find_cheapest(iata_codes)
+    # 2. Start Search
+    send_message(chat_id, f"🔍 Checking Manila to {text.title()}...")
+    
+    # 3. Get Result
+    result = get_flight(iata)
 
     if result:
-        reply = (f"✈️ Cheapest Flight Found!\n\n"
-                 f"📍 Manila (MNL) → {result['iata']}\n"
-                 f"🛫 Airline: {result['airline']}\n"
-                 f"💰 Price: ₱{result['price']:,}\n"
-                 f"📅 Date: 2026-06-15")
+        price = result['price']
+        # If it's a number, format it with ₱
+        price_str = f"₱{price:,}" if isinstance(price, (int, float)) else price
+        
+        msg = (f"✈️ Cheapest Found!\n\n"
+               f"📍 MNL → {result['iata']}\n"
+               f"🛫 Airline: {result['airline']}\n"
+               f"💰 Price: {price_str}\n"
+               f"📅 Date: Aug 15, 2026")
     else:
-        reply = f"❌ Sorry, I couldn't find any flights for {text.title()} right now."
+        msg = f"❌ No flights found for {text.title()} on that date."
 
-    send_message(chat_id, reply)
+    send_message(chat_id, msg)
     return "OK", 200
 
 # -------- HOME ROUTE --------
 @app.route('/')
 def index():
     set_webhook()
-    return "<h1>Bot is running!</h1><p>Webhook has been refreshed.</p>", 200
+    return "Bot is Active!", 200
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
