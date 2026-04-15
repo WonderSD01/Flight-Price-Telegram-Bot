@@ -16,6 +16,7 @@ ORIGIN = "MNL"
 app = Flask(__name__)
 
 # -------- DATA DICTIONARIES --------
+# Maps user input to IATA codes
 CITY_AIRPORTS = {
     "tokyo": ["NRT", "HND"],
     "osaka": ["KIX"],
@@ -32,6 +33,23 @@ COUNTRY_AIRPORTS = {
     "thailand": ["BKK", "HKT"],
     "taiwan": ["TPE", "KHH"],
     "vietnam": ["SGN", "HAN"]
+}
+
+# CRITICAL: Maps IATA codes to SkyScrapper Entity IDs
+# Without these specific IDs, the API returns "No results"
+ENTITY_MAP = {
+    "NRT": "95673321", # Tokyo Narita
+    "HND": "95673320", # Tokyo Haneda
+    "KIX": "95673551", # Osaka
+    "BKK": "95565061", # Bangkok
+    "HKT": "95565058", # Phuket
+    "ICN": "95692133", # Seoul
+    "PUS": "95692135", # Busan
+    "SIN": "95565050", # Singapore
+    "HKG": "95565074", # Hong Kong
+    "TPE": "95673620", # Taipei
+    "SGN": "95565065", # Ho Chi Minh
+    "HAN": "95565063", # Hanoi
 }
 
 # -------- TELEGRAM HELPERS --------
@@ -52,18 +70,22 @@ def set_webhook():
 
 # -------- FLIGHT SEARCH LOGIC --------
 def search_flight(dest_iata):
-    """Calls the SkyScrapper API for a single IATA code."""
+    """Calls the SkyScrapper API using the correct Entity ID."""
     url = "https://sky-scrapper.p.rapidapi.com/api/v1/flights/searchFlights"
-    # Note: Using hardcoded dates for this example; 
-    # In a real bot, you'd ask the user for a date!
+    
+    # Get the entity ID for the specific airport
+    # Defaulting to Tokyo's ID if not in map, but BKK/HKT are now included!
+    dest_entity = ENTITY_MAP.get(dest_iata, "95673321")
+
     querystring = {
         "originSkyId": ORIGIN,
         "destinationSkyId": dest_iata,
-        "originEntityId": "95673398", # MNL Entity ID
-        "destinationEntityId": "95673321", # Example Default
+        "originEntityId": "95673398", # Manila Entity ID
+        "destinationEntityId": dest_entity, 
         "date": "2026-06-15",
         "cabinClass": "economy",
         "adults": "1",
+        "sortBy": "best",
         "currency": "PHP"
     }
 
@@ -75,7 +97,8 @@ def search_flight(dest_iata):
     try:
         response = requests.get(url, headers=headers, params=querystring, timeout=15)
         data = response.json()
-        if data.get("status") and data["data"].get("itineraries"):
+        
+        if data.get("status") and data.get("data") and data["data"].get("itineraries"):
             cheapest = data["data"]["itineraries"][0]
             return {
                 "price": cheapest["price"]["raw"],
@@ -102,6 +125,7 @@ def find_cheapest(iata_list):
     valid_results = [r for r in results if r is not None]
     if not valid_results:
         return None
+    # Returns the result with the lowest price
     return min(valid_results, key=lambda x: x["price"])
 
 # -------- WEBHOOK ROUTE --------
@@ -118,17 +142,17 @@ def webhook():
     if not text or not chat_id:
         return "OK", 200
 
-    # 1. Get IATA codes
+    # 1. Match input to airports
     iata_codes = get_iata_codes(text)
 
     if not iata_codes:
         send_message(chat_id, "❌ Sorry, I don't recognize that destination. Try 'Japan' or 'Bangkok'.")
         return "OK", 200
 
-    # 2. Inform user search has started
-    send_message(chat_id, f"🔍 Searching for the cheapest flights to {text.title()}...")
+    # 2. Start search
+    send_message(chat_id, f"🔍 Searching for the cheapest flights to {text.title()} for June 15...")
 
-    # 3. Find cheapest and reply
+    # 3. Find results
     result = find_cheapest(iata_codes)
 
     if result:
@@ -143,7 +167,7 @@ def webhook():
     send_message(chat_id, reply)
     return "OK", 200
 
-# -------- HOME ROUTE (Activation) --------
+# -------- HOME ROUTE --------
 @app.route('/')
 def index():
     set_webhook()
