@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
-RENDER_URL = os.getenv("https://flight-price-telegram-bot.onrender.com")  # set this in Render
+RENDER_URL = "https://flight-price-telegram-bot.onrender.com"
 
 if not TOKEN:
     raise ValueError("❌ TOKEN is missing")
