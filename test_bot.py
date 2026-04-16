@@ -83,12 +83,12 @@ def get_cheapest_flight(iata):
 
     for date in dates:
         print(f"🔍 Checking date: {date}")
-
         params = {
             "engine": "google_flights",
             "departure_id": "MNL",
             "arrival_id": iata,
             "outbound_date": date,
+            "type": "2",  # ✅ ONE-WAY (THIS FIXES YOUR ERROR)
             "currency": "PHP",
             "hl": "en",
             "api_key": SERPAPI_KEY
