@@ -162,9 +162,19 @@ def process_flight(chat_id, dest_key, iata):
     results = get_best_flights(iata)
 
     if not results:
-        send_message(chat_id,
-            f"❌ No flights found for {dest_key.title()}.\nTry again later."
+        fallback_link = f"https://www.google.com/travel/flights?hl=en#flt=MNL.{iata}"
+
+        msg = (
+            f"⚠️ Live prices unavailable right now.\n\n"
+            f"👉 Tap below to check flights directly:"
         )
+
+        buttons = [[{
+            "text": f"Search Flights to {dest_key.title()} ✈️",
+            "url": fallback_link
+        }]]
+
+        send_message(chat_id, msg, buttons)
         return
 
     msg = "✈️ Top Cheapest Flights:\n\n"
