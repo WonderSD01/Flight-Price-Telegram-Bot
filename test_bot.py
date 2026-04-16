@@ -1,18 +1,24 @@
 import os
 import requests
-from flask import Flask, request
+from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 
 # -------- LOAD ENV --------
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
-RENDER_URL = "https://flight-price-telegram-bot.onrender.com"
+RENDER_URL = os.getenv("RENDER_URL")  # set this in Render
+
+if not TOKEN:
+    raise ValueError("❌ TOKEN is missing")
+if not SERPAPI_KEY:
+    raise ValueError("❌ SERPAPI_KEY is missing")
+if not RENDER_URL:
+    raise ValueError("❌ RENDER_URL is missing")
 
 app = Flask(__name__)
 
-# -------- DATA DICTIONARIES (Simplified for Speed) --------
-# We use only the main airport for each to keep it fast
+# -------- DESTINATIONS --------
 DESTINATIONS = {
     "tokyo": "NRT",
     "japan": "NRT",
@@ -26,91 +32,140 @@ DESTINATIONS = {
     "taipei": "TPE"
 }
 
-# -------- TELEGRAM HELPERS --------
+# -------- TELEGRAM --------
 def send_message(chat_id, text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    requests.post(url, data={"chat_id": chat_id, "text": text})
+    try:
+        res = requests.post(url, json={
+            "chat_id": chat_id,
+            "text": text
+        }, timeout=10)
+        print("📤 Telegram response:", res.text)
+    except Exception as e:
+        print("❌ Telegram send error:", e)
 
 def set_webhook():
     webhook_url = f"{RENDER_URL}/{TOKEN}"
-    url = f"https://api.telegram.org/bot{TOKEN}/setWebhook?url={webhook_url}"
-    requests.get(url)
+    url = f"https://api.telegram.org/bot{TOKEN}/setWebhook"
+    try:
+        res = requests.post(url, json={"url": webhook_url})
+        print("🔗 Webhook set:", res.text)
+    except Exception as e:
+        print("❌ Webhook error:", e)
 
-# -------- FLIGHT SEARCH (Simplified) --------
+# -------- HELPER: FIND DESTINATION --------
+def extract_destination(user_text):
+    user_text = user_text.lower()
+    for key in DESTINATIONS:
+        if key in user_text:
+            return key, DESTINATIONS[key]
+    return None, None
+
+# -------- FLIGHT SEARCH --------
 def get_flight(iata):
-    """Checks Google Flights for one specific airport."""
     url = "https://serpapi.com/search"
     params = {
         "engine": "google_flights",
         "departure_id": "MNL",
         "arrival_id": iata,
-        "outbound_date": "2026-08-15", # Further date for better availability
+        "outbound_date": "2026-08-15",
         "currency": "PHP",
         "hl": "en",
         "api_key": SERPAPI_KEY
     }
-    
-    try:
-        # We use a 15-second timeout to prevent Render from hanging
-        response = requests.get(url, params=params, timeout=15)
-        data = response.json()
-        
-        # Look for flights in 'best_flights' or 'other_flights'
-        flights = data.get("best_flights", []) or data.get("other_flights", [])
-        
-        if flights:
-            top = flights[0]
-            return {
-                "price": top.get("price"),
-                "airline": top["flights"][0].get("airline"),
-                "iata": iata
-            }
-    except Exception as e:
-        print(f"Error: {e}")
-    return None
 
-# -------- WEBHOOK ROUTE --------
+    try:
+        res = requests.get(url, params=params, timeout=25)
+        data = res.json()
+
+        print("🧪 SerpAPI response:", data)
+
+        if "error" in data:
+            print("❌ SerpAPI error:", data["error"])
+            return None
+
+        flights = data.get("best_flights") or data.get("other_flights") or []
+
+        if not flights:
+            return None
+
+        top = flights[0]
+
+        airline = (
+            top.get("flights", [{}])[0].get("airline", "Unknown")
+        )
+
+        price = top.get("price", "N/A")
+
+        return {
+            "price": price,
+            "airline": airline,
+            "iata": iata
+        }
+
+    except Exception as e:
+        print("❌ Flight fetch error:", e)
+        return None
+
+# -------- WEBHOOK --------
 @app.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
-    data = request.json
-    if not data or "message" not in data: return "OK", 200
+    try:
+        data = request.get_json()
+        print("📩 Incoming:", data)
 
-    chat_id = data["message"]["chat"]["id"]
-    text = data["message"].get("text", "").lower().strip()
+        if not data or "message" not in data:
+            return "OK", 200
 
-    # 1. Check if we support the destination
-    iata = DESTINATIONS.get(text)
-    if not iata:
-        send_message(chat_id, "❌ Try 'Japan' or 'Bangkok'.")
+        chat_id = data["message"]["chat"]["id"]
+        text = data["message"].get("text", "")
+
+        # Find destination
+        dest_key, iata = extract_destination(text)
+
+        if not iata:
+            send_message(chat_id,
+                "❌ I didn’t understand.\n\nTry:\n• Japan\n• Tokyo\n• Bangkok\n• Seoul"
+            )
+            return "OK", 200
+
+        send_message(chat_id, f"🔍 Searching flights to {dest_key.title()}...")
+
+        result = get_flight(iata)
+
+        if result:
+            price = result["price"]
+
+            if isinstance(price, (int, float)):
+                price_str = f"₱{price:,}"
+            else:
+                price_str = str(price)
+
+            msg = (
+                f"✈️ Cheapest Flight Found!\n\n"
+                f"📍 MNL → {result['iata']}\n"
+                f"🛫 Airline: {result['airline']}\n"
+                f"💰 Price: {price_str}\n"
+                f"📅 Date: Aug 15, 2026"
+            )
+        else:
+            msg = f"❌ No flights found for {dest_key.title()}."
+
+        send_message(chat_id, msg)
+
         return "OK", 200
 
-    # 2. Start Search
-    send_message(chat_id, f"🔍 Checking Manila to {text.title()}...")
-    
-    # 3. Get Result
-    result = get_flight(iata)
+    except Exception as e:
+        print("❌ Webhook error:", e)
+        return "OK", 200
 
-    if result:
-        price = result['price']
-        # If it's a number, format it with ₱
-        price_str = f"₱{price:,}" if isinstance(price, (int, float)) else price
-        
-        msg = (f"✈️ Cheapest Found!\n\n"
-               f"📍 MNL → {result['iata']}\n"
-               f"🛫 Airline: {result['airline']}\n"
-               f"💰 Price: {price_str}\n"
-               f"📅 Date: Aug 15, 2026")
-    else:
-        msg = f"❌ No flights found for {text.title()} on that date."
-
-    send_message(chat_id, msg)
-    return "OK", 200
-
-# -------- HOME ROUTE --------
-@app.route('/')
-def index():
+# -------- ROOT --------
+@app.route("/", methods=["GET"])
+def home():
     set_webhook()
-    return "Bot is Active!", 200
+    return "✅ Bot is running!", 200
 
+# -------- START --------
 if __name__ == "__main__":
+    print("🚀 Starting bot...")
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
