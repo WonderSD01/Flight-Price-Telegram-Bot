@@ -2,6 +2,7 @@ import os
 import requests
 import threading
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, request
 from dotenv import load_dotenv
 
@@ -33,15 +34,26 @@ DESTINATIONS = {
 }
 
 # -------- TELEGRAM --------
-def send_message(chat_id, text):
+def send_message(chat_id, text, buttons=None):
     if not TOKEN:
         print("❌ TOKEN missing")
         return
 
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "disable_web_page_preview": False
+    }
+
+    if buttons:
+        payload["reply_markup"] = {
+            "inline_keyboard": buttons
+        }
+
     try:
         requests.post(
             f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": text},
+            json=payload,
             timeout=10
         )
     except Exception as e:
@@ -67,87 +79,111 @@ def extract_destination(text):
             return key, DESTINATIONS[key]
     return None, None
 
-# -------- GENERATE MULTIPLE DATES --------
+# -------- DATE GENERATOR --------
 def get_dates():
-    base = datetime.today() + timedelta(days=30)  # start 1 month ahead
+    base = datetime.today() + timedelta(days=30)
     return [(base + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(0, 10, 2)]
-    # 5 dates: +0, +2, +4, +6, +8 days
 
-# -------- FLIGHT SEARCH (MULTI-DATE) --------
-def get_cheapest_flight(iata):
-    if not SERPAPI_KEY:
-        return None
+# -------- FETCH FLIGHTS PER DATE --------
+def fetch_flights(iata, date):
+    params = {
+        "engine": "google_flights",
+        "departure_id": "MNL",
+        "arrival_id": iata,
+        "outbound_date": date,
+        "type": "2",  # one-way
+        "adults": 1,
+        "travel_class": "economy",
+        "currency": "PHP",
+        "hl": "en",
+        "api_key": SERPAPI_KEY
+    }
 
-    dates = get_dates()
-    cheapest = None
+    try:
+        res = requests.get("https://serpapi.com/search", params=params, timeout=20)
+        data = res.json()
 
-    for date in dates:
-        print(f"🔍 Checking date: {date}")
-        params = {
-            "engine": "google_flights",
-            "departure_id": "MNL",
-            "arrival_id": iata,
-            "outbound_date": date,
-            "type": "2",  # ✅ ONE-WAY (THIS FIXES YOUR ERROR)
-            "currency": "PHP",
-            "hl": "en",
-            "api_key": SERPAPI_KEY
-        }
+        if "error" in data:
+            print("❌ API error:", data["error"])
+            return []
 
-        try:
-            res = requests.get("https://serpapi.com/search", params=params, timeout=20)
-            data = res.json()
+        flights = data.get("best_flights") or data.get("other_flights") or []
 
-            if "error" in data:
-                print("❌ API error:", data["error"])
-                continue
+        results = []
+        for f in flights[:3]:
+            price = f.get("price")
+            airline = f.get("flights", [{}])[0].get("airline", "Unknown")
 
-            flights = data.get("best_flights") or data.get("other_flights")
-            if not flights:
-                continue
+            # Get real link if available
+            link = f.get("link")
 
-            top = flights[0]
+            # Fallback Google Flights link
+            if not link:
+                link = f"https://www.google.com/travel/flights?hl=en#flt=MNL.{iata}.{date}"
 
-            price = top.get("price")
-            airline = top.get("flights", [{}])[0].get("airline", "Unknown")
-
-            if not isinstance(price, (int, float)):
-                continue
-
-            if cheapest is None or price < cheapest["price"]:
-                cheapest = {
+            if isinstance(price, (int, float)):
+                results.append({
                     "price": price,
                     "airline": airline,
+                    "date": date,
                     "iata": iata,
-                    "date": date
-                }
+                    "link": link
+                })
 
-        except Exception as e:
-            print("❌ Flight error:", e)
+        return results
 
-    return cheapest
+    except Exception as e:
+        print("❌ Fetch error:", e)
+        return []
 
-# -------- BACKGROUND TASK --------
+# -------- PARALLEL SEARCH --------
+def get_best_flights(iata):
+    dates = get_dates()
+    all_flights = []
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [executor.submit(fetch_flights, iata, d) for d in dates]
+
+        for future in as_completed(futures):
+            results = future.result()
+            if results:
+                all_flights.extend(results)
+
+    if not all_flights:
+        return None
+
+    all_flights.sort(key=lambda x: x["price"])
+    return all_flights[:3]
+
+# -------- PROCESS --------
 def process_flight(chat_id, dest_key, iata):
-    send_message(chat_id, f"🔍 Finding cheapest flights to {dest_key.title()}...")
+    send_message(chat_id, f"🔍 Finding best flights to {dest_key.title()}...")
 
-    result = get_cheapest_flight(iata)
+    results = get_best_flights(iata)
 
-    if result:
-        msg = (
-            f"✈️ Cheapest Flight Found!\n\n"
-            f"📍 MNL → {result['iata']}\n"
-            f"🛫 Airline: {result['airline']}\n"
-            f"💰 Price: ₱{result['price']:,}\n"
-            f"📅 Date: {result['date']}"
+    if not results:
+        send_message(chat_id,
+            f"❌ No flights found for {dest_key.title()}.\nTry again later."
         )
-    else:
-        msg = (
-            f"❌ No flights found for {dest_key.title()}.\n"
-            f"💡 Try again later or another destination."
+        return
+
+    msg = "✈️ Top Cheapest Flights:\n\n"
+    buttons = []
+
+    for i, f in enumerate(results, 1):
+        msg += (
+            f"{i}. 💰 ₱{f['price']:,}\n"
+            f"   🛫 {f['airline']}\n"
+            f"   📅 {f['date']}\n\n"
         )
 
-    send_message(chat_id, msg)
+        # Add button for each flight
+        buttons.append([{
+            "text": f"Book #{i} ✈️",
+            "url": f["link"]
+        }])
+
+    send_message(chat_id, msg, buttons)
 
 # -------- WEBHOOK --------
 @app.route(f"/{TOKEN}", methods=["POST"])
